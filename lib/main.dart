@@ -1,6 +1,27 @@
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-void main() {
+// Конфигурация Supabase
+class SupabaseConfig {
+  static const String supabaseUrl = 'https://mkicukrucvpejjcszqks.supabase.co';
+  static const String supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1raWN1a3J1Y3ZwZWpqY3N6cWtzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ1MjkwNTcsImV4cCI6MjA4MDEwNTA1N30.yaPfyij4Nw1bjmOEz1Wy9U1g4SVQxevRzcjUuQPX3PA';
+
+  static Future<void> initialize() async {
+    await Supabase.initialize(
+      url: supabaseUrl,
+      anonKey: supabaseAnonKey,
+    );
+  }
+
+  static SupabaseClient get client => Supabase.instance.client;
+}
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Инициализация Supabase
+  await SupabaseConfig.initialize();
+
   runApp(const MyApp());
 }
 
@@ -14,15 +35,90 @@ class MyApp extends StatelessWidget {
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
-      home: LoginScreen(), // Начинаем с экрана авторизации
+      home: const AuthWrapper(), // Обертка для проверки аутентификации
     );
+  }
+}
+
+// Обертка для проверки состояния аутентификации
+class AuthWrapper extends StatefulWidget {
+  const AuthWrapper({super.key});
+
+  @override
+  State<AuthWrapper> createState() => _AuthWrapperState();
+}
+
+class _AuthWrapperState extends State<AuthWrapper> {
+  final _supabase = SupabaseConfig.client;
+  User? _currentUser;
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _getCurrentUser();
+
+    // Слушатель изменений аутентификации
+    _supabase.auth.onAuthStateChange.listen((AuthState data) {
+      final AuthChangeEvent event = data.event;
+      print('Auth state changed: $event');
+
+      if (event == AuthChangeEvent.signedIn) {
+        setState(() {
+          _currentUser = data.session?.user;
+          _isLoading = false;
+        });
+      } else if (event == AuthChangeEvent.signedOut) {
+        setState(() {
+          _currentUser = null;
+          _isLoading = false;
+        });
+      }
+    });
+  }
+
+  Future<void> _getCurrentUser() async {
+    try {
+      final session = _supabase.auth.currentSession;
+      setState(() {
+        _currentUser = session?.user;
+        _isLoading = false;
+      });
+      print('Current user: ${session?.user?.email}');
+    } catch (e) {
+      print('Error getting current user: $e');
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isLoading) {
+      return Scaffold(
+        body: Center(
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+
+    print('Building AuthWrapper: user = ${_currentUser?.email}');
+
+    if (_currentUser != null) {
+      return const MainAppScreen();
+    } else {
+      return const LoginScreen();
+    }
   }
 }
 
 // ЭКРАН АВТОРИЗАЦИИ
 class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key});
+
   @override
-  _LoginScreenState createState() => _LoginScreenState();
+  State<LoginScreen> createState() => _LoginScreenState();
 }
 
 class _LoginScreenState extends State<LoginScreen> {
@@ -32,31 +128,83 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isPasswordVisible = false;
   bool _isLoading = false;
 
-  @override
-  void dispose() {
-    _emailController.dispose();
-    _passwordController.dispose();
-    super.dispose();
-  }
+  final _supabase = SupabaseConfig.client;
 
-  void _login() async {
+  Future<void> _login() async {
     if (_formKey.currentState!.validate()) {
       setState(() {
         _isLoading = true;
       });
 
-      // Имитация процесса авторизации
-      await Future.delayed(Duration(seconds: 2));
-
-      setState(() {
-        _isLoading = false;
-      });
-
-      // ПЕРЕХОД НА ГЛАВНОЕ ОКНО ПРИЛОЖЕНИЯ
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (context) => MainAppScreen()),
-      );
+      try {
+        await _supabase.auth.signInWithPassword(
+          email: _emailController.text,
+          password: _passwordController.text,
+        );
+        // Успешный вход - навигация через AuthWrapper
+      } on AuthException catch (e) {
+        _showErrorDialog('Ошибка авторизации: ${e.message}');
+      } catch (e) {
+        _showErrorDialog('Произошла ошибка: $e');
+      } finally {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
+  }
+
+  void _showErrorDialog(String message) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Ошибка'),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _resetPassword() async {
+    if (_emailController.text.isEmpty) {
+      _showErrorDialog('Введите email для восстановления пароля');
+      return;
+    }
+
+    try {
+      await _supabase.auth.resetPasswordForEmail(_emailController.text);
+      _showSuccessDialog('Инструкции по сбросу пароля отправлены на ваш email');
+    } catch (e) {
+      _showErrorDialog('Ошибка при восстановлении пароля: $e');
+    }
+  }
+
+  void _showSuccessDialog(String message) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Успешно'),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
   }
 
   @override
@@ -65,15 +213,15 @@ class _LoginScreenState extends State<LoginScreen> {
       backgroundColor: Colors.white,
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: EdgeInsets.all(24.0),
+          padding: const EdgeInsets.all(24.0),
           child: Form(
             key: _formKey,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                SizedBox(height: 60),
+                const SizedBox(height: 60),
                 // Заголовок
-                Text(
+                const Text(
                   'Вход в аккаунт',
                   style: TextStyle(
                     fontSize: 28,
@@ -81,7 +229,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     color: Colors.black87,
                   ),
                 ),
-                SizedBox(height: 8),
+                const SizedBox(height: 8),
                 Text(
                   'Введите ваши данные для входа',
                   style: TextStyle(
@@ -89,17 +237,17 @@ class _LoginScreenState extends State<LoginScreen> {
                     color: Colors.grey[600],
                   ),
                 ),
-                SizedBox(height: 40),
+                const SizedBox(height: 40),
 
                 // Поле для email/логина
-                Text(
+                const Text(
                   'Email или логин',
                   style: TextStyle(
                     fontWeight: FontWeight.w500,
                     color: Colors.black87,
                   ),
                 ),
-                SizedBox(height: 8),
+                const SizedBox(height: 8),
                 TextFormField(
                   controller: _emailController,
                   keyboardType: TextInputType.emailAddress,
@@ -108,7 +256,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
                     ),
-                    prefixIcon: Icon(Icons.email_outlined),
+                    prefixIcon: const Icon(Icons.email_outlined),
                   ),
                   validator: (value) {
                     if (value == null || value.isEmpty) {
@@ -117,17 +265,17 @@ class _LoginScreenState extends State<LoginScreen> {
                     return null;
                   },
                 ),
-                SizedBox(height: 20),
+                const SizedBox(height: 20),
 
                 // Поле для пароля
-                Text(
+                const Text(
                   'Пароль',
                   style: TextStyle(
                     fontWeight: FontWeight.w500,
                     color: Colors.black87,
                   ),
                 ),
-                SizedBox(height: 8),
+                const SizedBox(height: 8),
                 TextFormField(
                   controller: _passwordController,
                   obscureText: !_isPasswordVisible,
@@ -136,7 +284,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
                     ),
-                    prefixIcon: Icon(Icons.lock_outline),
+                    prefixIcon: const Icon(Icons.lock_outline),
                     suffixIcon: IconButton(
                       icon: Icon(
                         _isPasswordVisible
@@ -161,16 +309,14 @@ class _LoginScreenState extends State<LoginScreen> {
                     return null;
                   },
                 ),
-                SizedBox(height: 16),
+                const SizedBox(height: 16),
 
                 // Забыли пароль
                 Align(
                   alignment: Alignment.centerRight,
                   child: TextButton(
-                    onPressed: () {
-                      // Навигация на экран восстановления пароля
-                    },
-                    child: Text(
+                    onPressed: _resetPassword,
+                    child: const Text(
                       'Забыли пароль?',
                       style: TextStyle(
                         color: Colors.blue,
@@ -179,7 +325,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
                 ),
-                SizedBox(height: 30),
+                const SizedBox(height: 30),
 
                 // Кнопка входа
                 SizedBox(
@@ -196,7 +342,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       elevation: 2,
                     ),
                     child: _isLoading
-                        ? SizedBox(
+                        ? const SizedBox(
                       height: 20,
                       width: 20,
                       child: CircularProgressIndicator(
@@ -204,7 +350,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                       ),
                     )
-                        : Text(
+                        : const Text(
                       'Войти',
                       style: TextStyle(
                         fontSize: 16,
@@ -213,23 +359,23 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
                 ),
-                SizedBox(height: 30),
+                const SizedBox(height: 30),
 
                 // Разделитель
                 Row(
                   children: [
-                    Expanded(child: Divider()),
+                    const Expanded(child: Divider()),
                     Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 16),
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: Text(
                         'или',
                         style: TextStyle(color: Colors.grey),
                       ),
                     ),
-                    Expanded(child: Divider()),
+                    const Expanded(child: Divider()),
                   ],
                 ),
-                SizedBox(height: 30),
+                const SizedBox(height: 30),
 
                 // Кнопки социальных сетей
                 Row(
@@ -239,19 +385,19 @@ class _LoginScreenState extends State<LoginScreen> {
                       onPressed: () {},
                       icon: Icon(Icons.facebook, color: Colors.blue[800], size: 32),
                     ),
-                    SizedBox(width: 20),
+                    const SizedBox(width: 20),
                     IconButton(
                       onPressed: () {},
                       icon: Icon(Icons.g_mobiledata, color: Colors.red, size: 32),
                     ),
-                    SizedBox(width: 20),
+                    const SizedBox(width: 20),
                     IconButton(
                       onPressed: () {},
                       icon: Icon(Icons.apple, color: Colors.black, size: 32),
                     ),
                   ],
                 ),
-                SizedBox(height: 40),
+                const SizedBox(height: 40),
 
                 // Ссылка на регистрацию
                 Center(
@@ -266,7 +412,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         onTap: () {
                           // Навигация на экран регистрации
                         },
-                        child: Text(
+                        child: const Text(
                           'Зарегистрироваться',
                           style: TextStyle(
                             color: Colors.blue,
@@ -286,9 +432,18 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 }
 
-// ГЛАВНОЕ ОКНО ПРИЛОЖЕНИЯ (ваш оригинальный код)
+// ГЛАВНОЕ ОКНО ПРИЛОЖЕНИЯ
 class MainAppScreen extends StatelessWidget {
   const MainAppScreen({super.key});
+
+  Future<void> _logout(BuildContext context) async {
+    try {
+      await SupabaseConfig.client.auth.signOut();
+      // Навигация произойдет автоматически через AuthWrapper
+    } catch (e) {
+      print('Ошибка при выходе: $e');
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -299,13 +454,8 @@ class MainAppScreen extends StatelessWidget {
         centerTitle: true,
         actions: [
           IconButton(
-            icon: Icon(Icons.logout, color: Colors.white),
-            onPressed: () {
-              // Возврат на экран авторизации
-              Navigator.of(context).pushReplacement(
-                MaterialPageRoute(builder: (context) => LoginScreen()),
-              );
-            },
+            icon: const Icon(Icons.logout, color: Colors.white),
+            onPressed: () => _logout(context),
           ),
         ],
       ),
@@ -325,15 +475,16 @@ class MainAppScreen extends StatelessWidget {
               ),
               child: Column(
                 children: [
-                  SizedBox(height: 20,),
+                  const SizedBox(height: 20),
                   Expanded(
-                      child: ListView(
-                        children: [
-                          _buildImageItem('assets/img/vsevedushiy_chitatel.jpg', 'Точка зрения всеведущего читателя'),
-                          _buildImageItem('assets/img/solo_up_leveling.jpg', 'Поднятие уровня в одиночку'),
-                          _buildImageItem('assets/img/pick_me_up.jpg', 'Выбери меня'),
-                        ],
-                      )
+                    child: ListView(
+                      children: [
+                        _buildImageItem('assets/img/vsevedushiy_chitatel.jpg', 'Точка зрения всеведущего читателя'),
+                        _buildImageItem('assets/img/solo_up_leveling.jpg', 'Поднятие уровня в одиночку'),
+                        _buildImageItem('assets/img/pick_me_up.jpg', 'Выбери меня'),
+                        _buildImageItem('assets/img/ya_ne_talantliviy.jpg', 'Я не талантливый'),
+                      ],
+                    ),
                   )
                 ],
               ),
@@ -347,8 +498,8 @@ class MainAppScreen extends StatelessWidget {
 
 Widget _buildImageItem(String imagePath, String caption) {
   return Container(
-    margin: EdgeInsets.only(bottom: 15),
-    padding: EdgeInsets.all(10),
+    margin: const EdgeInsets.only(bottom: 15),
+    padding: const EdgeInsets.all(10),
     decoration: BoxDecoration(
       color: Colors.white,
       borderRadius: BorderRadius.circular(15),
@@ -356,7 +507,7 @@ Widget _buildImageItem(String imagePath, String caption) {
         BoxShadow(
           color: Colors.black26,
           blurRadius: 5,
-          offset: Offset(0, 2),
+          offset: const Offset(0, 2),
         ),
       ],
     ),
@@ -368,10 +519,10 @@ Widget _buildImageItem(String imagePath, String caption) {
           height: 200,
           fit: BoxFit.cover,
         ),
-        SizedBox(width: 15),
+        const SizedBox(width: 15),
         Text(
           caption,
-          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
           textAlign: TextAlign.center,
         ),
       ],
